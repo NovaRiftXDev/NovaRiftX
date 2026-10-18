@@ -1,0 +1,7 @@
+export const memeControls=[
+ ...['Big heads','Tiny troops','Giraffe squad','Pancake parade','Wide bois','Noodle people','Giant squad','Pocket robots','Long arms illusion','Chonky mode'].map((label,i)=>({id:'mshape'+i,label,group:'shape',index:i})),
+ ...['Disco spin','Wobble wobble','Bunny bounce','Moonwalk tilt','T-pose lean','Sideways shuffle','Robot limbo','Helicopter hats','Silly salute','Jelly dance'].map((label,i)=>({id:'mmotion'+i,label,group:'motion',index:i})),
+ ...['Duck heads','Banana hats','Pizza crowns','Clown squad','Frog hats','Cat ears party','Alien visitors','Poop crowns','Potato kings','Cool shades'].map((label,i)=>({id:'mhat'+i,label,group:'hat',index:i,symbol:['🦆','🍌','🍕','🤡','🐸','🐱','👽','💩','🥔','😎'][i]})),
+ ...['Confetti party','Duck rain','Taco Tuesday','Banana storm','Frog rain','Donut shower','Star shower','Snow day','Bubble bath','Heart rain'].map((label,i)=>({id:'mrain'+i,label,group:'rain',index:i,symbol:['🎉','🦆','🌮','🍌','🐸','🍩','⭐','❄','🫧','💖'][i]})),
+ ...['Vintage movie','Candy vision','Ice cream world','Purple planet','Radioactive peas','Deep fried','Dreamy fog','Comic colors','Ghost world','Orange soda'].map((label,i)=>({id:'mfilter'+i,label,group:'filter',index:i,value:['sepia(1)','hue-rotate(60deg)','hue-rotate(180deg)','hue-rotate(260deg)','hue-rotate(90deg)','saturate(2) contrast(1.25)','saturate(.5) brightness(1.2)','saturate(1.8)','grayscale(1)','sepia(.7) saturate(1.8)'][i]}))
+].map(c=>({...c,kind:'toggle',description:'Room-wide cosmetic effect · no hitbox changes'}));
