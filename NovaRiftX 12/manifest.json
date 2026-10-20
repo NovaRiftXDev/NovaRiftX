@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "NovaRiftX",
+  "version": "3.0.10",
+  "description": "NovaRiftX: co-op survival and private battle royale with friends.",
+  "action": {
+    "default_title": "Play NovaRiftX"
+  },
+  "background": {
+    "service_worker": "open-game.js"
+  }
+}
