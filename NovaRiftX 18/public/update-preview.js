@@ -1,0 +1,17 @@
+import * as T from '/vendor/three.module.js';
+import {makeWorld,petModel} from './visuals.js';
+import {maps,terrainHeight} from './shared.js';
+import {buildBoxes,buildTriangles} from './building.js';
+import {enemyModel} from './enemy-models.js';
+import {createMinimap} from './minimap.js';
+import {createBuildRenderer} from './build-renderer.js';
+const scene=new T.Scene();scene.background=new T.Color(maps[5].sky);scene.fog=new T.Fog(maps[5].sky,42,140);
+const renderer=new T.WebGLRenderer({antialias:true});renderer.setSize(innerWidth,innerHeight);renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.toneMapping=T.ACESFilmicToneMapping;renderer.shadowMap.enabled=true;document.body.prepend(renderer.domElement);
+scene.add(new T.HemisphereLight(0xc7e7ff,0x3a3d53,2.8));const sun=new T.DirectionalLight(0xffe7ce,3);sun.position.set(24,40,45);scene.add(sun);makeWorld(scene,5);
+const spec=maps[5].lookouts[1],camera=new T.PerspectiveCamera(48,innerWidth/innerHeight,.1,220);let close=false;
+function view(){camera.position.set(close?31:48,close?10:17,close?38:49);camera.lookAt(close?25:31,close?4.6:6,close?24:25);}view();document.querySelector('#view').onclick=()=>{close=!close;view();};
+const state={phase:'fight',map:5,builds:[{kind:'wall',id:1,x:26,z:26,y:3,turn:0,edit:0},{kind:'floor',id:2,x:26,z:24,y:3,turn:0,edit:0},{kind:'ramp',id:3,x:30,z:22,y:3,turn:0,edit:0},{kind:'cone',id:4,x:22,z:22,y:3,turn:0,edit:0}],players:[{id:'you',x:27,z:32,y:0,yaw:0,hp:100}],enemies:[{type:0,x:25,z:31,hp:20},{type:1,x:20,z:29,hp:44},{type:2,x:32,z:26,hp:30},{type:3,x:29,z:31,hp:38}]};
+const buildDraw=createBuildRenderer(scene);buildDraw.sync(state.builds);document.querySelector('#edit').onclick=()=>{state.builds=state.builds.map((b,i)=>i===0?{...b,edit:b.edit?0:(1<<4)|(1<<7)}:b);buildDraw.sync(state.builds);};
+const enemies=state.enemies.map(e=>{const m=enemyModel(e.type);m.userData.manualAnimation=true;m.position.set(e.x,terrainHeight(e.x,e.z,5)+(e.type===2?3:0),e.z);m.rotation.y=Math.PI;scene.add(m);return m;});const pet=petModel('pet1',{});pet.scale.multiplyScalar(.55);pet.position.set(28,terrainHeight(28,32,5)+.23,32);pet.rotation.y=.3;scene.add(pet);
+const radar=createMinimap();function frame(now){requestAnimationFrame(frame);radar.update(state,'you',now);for(let i=0;i<4;i++){const duration=[.55,.55,.65,.35][i],phase=(now*.001+i*.3)%2.5;enemies[i].userData.animate(now*.001,true,Math.max(0,duration-phase));}pet.userData.animate?.(now*.001,.8);renderer.render(scene,camera);}requestAnimationFrame(frame);
+addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();});

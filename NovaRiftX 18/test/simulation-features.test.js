@@ -1,0 +1,244 @@
+import {test,after} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {weapons,maps,terrainHeight,supportHeight,blocked} from '../public/shared.js';
+import {roomLayout} from '../public/building.js';
+import {defaultModifiers} from '../public/admin-config.js';
+
+const testData=mkdtempSync(tmpdir()+'/nova-simulation-');
+process.env.NOVA_DATA_DIR=testData;process.env.NODE_ENV='test';
+const {makeRoom,newWave,tick,risesAlong,shutdown}=await import('../server.js');
+const {fillBots,tickBots}=await import('../game-modes.js');
+after(()=>{shutdown();rmSync(testData,{recursive:true,force:true});});
+
+function player(overrides={}){
+ return {id:'human',name:'Test',ws:{readyState:0},x:0,y:0,z:0,vy:0,hp:100,energy:100,protected:false,
+  weapon:0,ammo:weapons.map(w=>w.mag),reserve:weapons.map(w=>w.reserve),cooldown:0,reload:0,
+  modifiers:defaultModifiers(),input:{yaw:0,pitch:0},...overrides};
+}
+function room(mode='coop',overrides={}){
+ const r=makeRoom('simulation',0,mode);r.phase='fight';r.supplyTimer=100;r.players.set('human',player());
+ Object.assign(r,overrides);return r;
+}
+
+test('ordinary guns need multiple hits on a fresh spider and other weapons leave full-health humans alive',()=>{
+ for(const weapon of [0,2,3,5,6,9]){
+  const r=room('coop'),p=r.players.get('human');r.modifiers.freezeEnemies=true;
+  r.enemies=[{id:900,type:0,x:0,y:0,z:-3,hp:34,maxHp:34,cd:100}];p.input={yaw:0,pitch:0,weapon,fire:true};p.modifiers.perfectAccuracy=true;
+  tick(r,.01);assert.equal(r.enemies[0].hp,34-weapons[weapon].damage);assert.ok(r.enemies[0].hp>0);
+ }
+ for(let weapon=0;weapon<weapons.length;weapon++){
+  if(weapons[weapon].oneShot)continue;
+  const r=room('royale'),p=r.players.get('human'),target=player({id:'opponent',x:0,z:-3});r.players.set(target.id,target);
+  p.input={yaw:0,pitch:0,weapon,fire:true};p.modifiers.perfectAccuracy=true;tick(r,.01);
+  assert.ok(target.hp>0&&target.hp<100,`${weapons[weapon].name} cannot one-shot a full-health real player`);
+ }
+});
+
+test('Rail sniper kills every AI species, arbitrarily strong bosses and real opponents in one hit',()=>{
+ assert.equal(weapons[7].name,'Rail sniper');assert.equal(weapons[7].scopeZoom,5);assert.equal(weapons[7].spread,0);
+ for(const type of [0,1,2,3])for(const boss of [false,true]){
+  const r=room('coop'),p=r.players.get('human');r.modifiers.freezeEnemies=true;
+  const e={id:999,type,boss,x:0,y:0,z:-3,hp:boss?10000000:1000,maxHp:10000000,cd:100};r.enemies=[e];p.input={yaw:0,pitch:0,weapon:7,fire:true};tick(r,.01);assert.equal(e.hp,0);
+ }
+ const r=room('royale'),p=r.players.get('human'),target=player({id:'target',z:-3,hp:200});r.players.set(target.id,target);p.input={yaw:0,pitch:0,weapon:7,fire:true};tick(r,.01);assert.equal(target.hp,0);
+});
+
+test('Rail sniper respects cover, squadmates, settings protection and invulnerability',()=>{
+ for(const protection of ['cover','team','settings','god']){
+  const r=room('botroyale',{teamSize:2,map:0}),p=r.players.get('human'),target=player({id:'target',z:protection==='cover'?-4:-3,hp:200});
+  if(protection==='cover')r.builds=[{id:1,kind:'wall',x:0,y:0,z:-2,turn:0,edit:0}];
+  p.teamId=1;target.teamId=protection==='team'?1:2;target.protected=protection==='settings';target.modifiers.god=protection==='god';r.players.set(target.id,target);r.modifiers.freezeEnemies=true;
+  p.input={yaw:0,pitch:0,weapon:7,fire:true};tick(r,.01);assert.equal(target.hp,200,protection);
+ }
+});
+
+test('regeneration waits five seconds after damage and heals only 3 HP/s; normal play has no passive healing',()=>{
+ const r=room('royale',{enemies:[{id:900,type:1,x:30,z:30,y:0,hp:10000,cd:100}]}),p=r.players.get('human');p.hp=50;
+ tick(r,1);assert.equal(p.hp,50);
+ p.modifiers.autoHeal=true;p.lastDamage=5;for(let i=0;i<5;i++)tick(r,1);assert.equal(p.hp,50);
+ tick(r,1);assert.equal(p.hp,53);
+});
+
+test('vampire healing is once per trigger, not per shotgun pellet, and stops after recent damage',()=>{
+ const r=room('royale',{enemies:[{id:900,type:1,x:0,z:-3,y:0,hp:10000,cd:100}]}),p=r.players.get('human');
+ p.hp=50;p.modifiers.vampire=true;p.modifiers.perfectAccuracy=true;p.input={yaw:0,pitch:0,weapon:1,fire:true};tick(r,.01);assert.equal(p.hp,52);
+ p.cooldown=0;tick(r,.01);assert.equal(p.hp,52,'rapid fire cannot stack healing');
+ p.cooldown=0;p.vampireCooldown=0;p.lastDamage=5;tick(r,.01);assert.equal(p.hp,52);
+});
+
+test('health pickups need close range and a break from damage; wave clear only restores 5 HP',()=>{
+ const r=room('royale',{enemies:[{id:900,type:1,x:30,z:30,y:0,hp:10000,cd:100}]}),p=r.players.get('human');p.hp=50;r.pickups=[{id:1,type:'health',x:3,z:0}];
+ tick(r,.01);assert.equal(p.hp,50);assert.equal(r.pickups.length,1);
+ p.x=3;p.lastDamage=5;tick(r,.01);assert.equal(p.hp,50);assert.equal(r.pickups.length,1);
+ p.lastDamage=0;tick(r,.01);assert.equal(p.hp,70);assert.equal(r.pickups.length,0);
+ const coop=room('coop');coop.players.get('human').hp=50;tick(coop,.01);assert.equal(coop.players.get('human').hp,55);
+});
+
+test('Speed up advances the whole room four simulation steps, including other players, AI and timers',async()=>{
+ const {adminCommand}=await import('../admin-server.js');
+ const setup=()=>{const r=room('coop',{enemies:[{id:900,type:0,x:0,z:-8,y:0,hp:1000,cd:100}]});
+  const p=r.players.get('human');p.input={yaw:0,pitch:0,w:true};p.reload=1;p.cooldown=.9;p.lastDamage=5;
+  r.players.set('friend',player({id:'friend',x:6,input:{yaw:0,pitch:0,d:true}}));return r;};
+ const fast=setup(),reference=setup(),p=fast.players.get('human');
+ assert.equal(adminCommand(fast,p,{id:'speedUp',value:'true'}).ok,false);
+ adminCommand(fast,p,{id:'speedUp',value:true});assert.equal(fast.modifiers.speedUp,true);assert.equal(p.modifiers.speedUp,false,'room setting does not become a personal movement hack');
+ tick(fast,.1);for(let i=0;i<4;i++)tick(reference,.1);
+ for(const id of ['human','friend'])for(const field of ['x','y','z','reload','cooldown','lastDamage'])assert.equal(fast.players.get(id)[field],reference.players.get(id)[field],id+' '+field);
+ for(const field of ['x','y','z','cd'])assert.equal(fast.enemies[0][field],reference.enemies[0][field]);
+ assert.equal(fast.simulationTime,.4);assert.equal(fast.supplyTimer,reference.supplyTimer);
+ adminCommand(fast,p,{id:'speedUp',value:false});tick(fast,.1);assert.equal(fast.simulationTime,.5);
+});
+
+test('Speed up accelerates storm, practice respawns, wave breaks and construction cooldowns',async()=>{
+ const {buildCommand}=await import('../public/building.js');
+ const royale=room('royale',{enemies:[{id:900,type:1,x:30,z:30,hp:1000}],elapsed:20});royale.modifiers.speedUp=true;tick(royale,.1);assert.ok(Math.abs(royale.elapsed-20.4)<1e-8);
+ const practice=room('practice',{enemies:[{id:900,type:0,x:10,z:-10,y:0,hp:0,maxHp:100}]});practice.modifiers.speedUp=true;tick(practice,.5);assert.equal(practice.enemies[0].hp,100);
+ const coop=room('coop',{phase:'break',timer:5});coop.modifiers.speedUp=true;tick(coop,.1);assert.ok(Math.abs(coop.timer-4.6)<1e-8);
+ const build=room('practice'),p=build.players.get('human');build.simulationTime=10;p.yaw=0;p.pitch=0;assert.equal(buildCommand(build,p,{kind:'wall'}),'Built wall');
+ p.x=8;assert.equal(buildCommand(build,p,{kind:'wall'}),'Build cooldown');build.modifiers.speedUp=true;tick(build,.05);assert.equal(buildCommand(build,p,{kind:'wall'}),'Built wall');
+});
+
+test('Super speed changes only personal movement and restores normal speed when disabled',async()=>{
+ const {adminControls}=await import('../public/admin-config.js');
+ const {adminCommand}=await import('../admin-server.js');
+ const control=adminControls.find(c=>c.id==='superSpeed');assert.equal(control.label,'Super speed');assert.equal(control.kind,'toggle');assert.equal(adminControls[2],control);
+ const r=room('practice'),p=r.players.get('human');p.input={yaw:0,pitch:0,w:true};
+ p.x=0;p.z=0;tick(r,.05);const normal=Math.abs(p.z);
+ p.x=0;p.z=0;assert.equal(adminCommand(r,p,{id:control.id,value:true}).ok,true);tick(r,.05);assert.ok(Math.abs(Math.abs(p.z)-normal*4)<.000001);
+ p.x=0;p.z=0;adminCommand(r,p,{id:control.id,value:false});tick(r,.05);assert.ok(Math.abs(Math.abs(p.z)-normal)<.000001);
+ const friend=player({id:'friend',x:6,input:{yaw:0,pitch:0,w:true}});r.players.set(friend.id,friend);p.x=0;p.z=0;adminCommand(r,p,{id:control.id,value:true});const before=r.simulationTime;tick(r,.05);
+ assert.ok(Math.abs(Math.abs(p.z)-normal*4)<.000001);assert.ok(Math.abs(Math.abs(friend.z)-normal)<.000001);assert.ok(Math.abs(r.simulationTime-before-.05)<1e-8);
+});
+
+test('ordinary guns deal half damage to real players; the Rail sniper is lethal to both humans and AI',()=>{
+ for(let weapon=0;weapon<weapons.length;weapon++)for(const human of [true,false]){
+  const r=room('royale',{map:0}),p=r.players.get('human');
+  p.weapon=weapon;p.input={yaw:0,pitch:0,weapon,fire:true};p.modifiers.perfectAccuracy=true;
+  const target=player({id:'target',x:0,y:0,z:-3,hp:10000});
+  if(human)r.players.set(target.id,target);else r.enemies=[{...target,type:1,cd:100}];
+  const victim=human?target:r.enemies[0];tick(r,1/30);
+  assert.equal(10000-victim.hp,weapons[weapon].oneShot?10000:weapons[weapon].damage*weapons[weapon].pellets*(human?.5:1),`${weapons[weapon].name} vs ${human?'human':'AI'}`);
+ }
+});
+
+test('practice ignores held reload and depleted ammo for every weapon without creating ammo drops',()=>{
+ const r=room('practice'),p=r.players.get('human');
+ r.enemies=[{id:90,type:0,x:0,y:0,z:-3,hp:1,maxHp:100}];
+ for(let weapon=0;weapon<weapons.length;weapon++){
+  p.ammo[weapon]=0;p.reserve[weapon]=0;p.reload=10;p.cooldown=0;
+  p.input={yaw:0,pitch:0,weapon,fire:true,reload:true};
+  tick(r,1/30);
+  assert.equal(p.reload,0);assert.equal(p.ammo[weapon],weapons[weapon].mag);
+  assert.equal(r.events.filter(e=>e.type==='shot').length,weapon+1);
+ }
+ assert.equal(r.pickups.length,0);
+});
+
+test('spiders pursue at a useful speed and deliver a stronger bite with short delayed poison',()=>{
+ const wave=room();newWave(wave);assert.equal(wave.enemies.find(e=>e.type===0).maxHp,34);
+ assert.ok(wave.enemies.find(e=>e.type===0).maxHp<wave.enemies.find(e=>e.type===1).maxHp);
+ const r=room(),p=r.players.get('human');
+ r.enemies=[{id:1,type:0,x:0,z:-5,y:0,hp:34,maxHp:34,cd:20}];
+ tick(r,.1);assert.ok(r.enemies[0].z>-4.60&&r.enemies[0].z<-4.58);
+ const e=r.enemies[0];e.z=-1;e.cd=0;tick(r,.01);
+ assert.equal(p.hp,90);assert.equal(p.poison,3);assert.equal(e.cd,1.2);assert.equal(e.attackSequence,1);assert.ok(e.attackTimer>0);
+ tick(r,.4);assert.equal(p.hp,90);assert.equal(e.attackSequence,1);
+ r.modifiers.peacefulEnemies=true;
+ tick(r,.41);tick(r,.81);tick(r,.81);assert.equal(p.hp,84);assert.equal(p.poison,0);
+ tick(r,1);assert.equal(p.hp,84);
+});
+
+test('multiple spider bites do not stack poison or postpone its next tick',()=>{
+ const r=room(),p=r.players.get('human');
+ const e={id:1,type:0,x:0,z:-1,y:0,hp:34,maxHp:34,cd:0};r.enemies=[e];
+ tick(r,.01);tick(r,.4);e.cd=0;tick(r,.1);
+ assert.equal(p.hp,80);assert.equal(p.poison,3);assert.ok(Math.abs(p.poisonTimer-.3)<.000001);
+ r.modifiers.peacefulEnemies=true;tick(r,.31);
+ assert.equal(p.hp,78);assert.equal(p.poison,2);
+});
+
+test('royale spiders have moderate health and melee pressure without matching co-op damage',()=>{
+ const r=room('botroyale'),p=r.players.get('human');fillBots(r);
+ assert.equal(r.enemies.filter(e=>e.type===0).every(e=>e.hp===40&&e.maxHp===40),true);
+ const e={id:201,type:0,bot:true,x:0,z:-5,y:0,hp:40,maxHp:40,cd:20};r.enemies=[e];
+ tickBots(r,.1);assert.ok(e.z>-4.63&&e.z<-4.61);
+ e.z=-1;e.cd=0;tickBots(r,.01);
+ assert.equal(p.hp,94);assert.equal(p.poison,3);assert.equal(e.cd,1.2);
+ tickBots(r,.4);assert.equal(p.hp,94);assert.equal(e.attackSequence,1);
+});
+
+test('Phoenix pursuit, damage and four-second blindness are stronger in co-op and royale',()=>{
+ const r=room(),p=r.players.get('human'),e={id:212,type:2,x:0,z:-8,y:3,hp:100,maxHp:100,cd:99};r.enemies=[e];
+ tick(r,.1);assert.ok(Math.abs(e.z+8-.58)<.00001,'co-op Phoenix speed is 5.8m/s');
+ e.z=-1;e.cd=0;tick(r,.01);assert.equal(p.hp,88);assert.equal(p.blind,4);assert.equal(e.attackSequence,1);
+ tick(r,.1);assert.equal(p.hp,88);assert.ok(p.blind<4&&p.blind>3.8,'blindness counts down');
+ r.modifiers.freezeEnemies=true;tick(r,4.1);assert.equal(p.blind,0);
+ const battle=room('botroyale'),human=battle.players.get('human'),bot={id:213,type:2,bot:true,x:0,z:-8,y:3,hp:100,cd:99};battle.enemies=[bot];
+ tickBots(battle,.1);assert.ok(Math.abs(bot.z+8-.58)<.00001,'royale Phoenix speed is 5.8m/s');
+ bot.z=-1;bot.cd=0;tickBots(battle,.01);assert.equal(human.hp,91);assert.equal(human.blind,4);
+ human.protected=true;bot.cd=0;tickBots(battle,.1);assert.equal(human.hp,91);
+});
+
+test('battle royale records the winning entity id and can distinguish a bot victory',()=>{
+ const r=room('botroyale'),p=r.players.get('human');r.enemies=[];tick(r,.01);assert.equal(r.phase,'over');assert.equal(r.winnerId,p.id);
+ const battle=room('botroyale');battle.players.get('human').hp=0;battle.enemies=[{id:250,name:'Bot 1',type:2,bot:true,x:0,z:0,y:3,hp:100,cd:99}];
+ tick(battle,.01);assert.equal(battle.phase,'over');assert.equal(battle.winnerId,250);assert.equal(battle.winner,'Bot 1');
+});
+
+test('all four enemies expose attack animation timers and cooldowns prevent continuous retriggering',()=>{
+ for(let type=0;type<4;type++){
+  const r=room(),p=r.players.get('human');
+  const e={id:101,type,x:0,z:type===3?-4:-1,y:type===2?3:0,hp:100,maxHp:100,cd:0};
+  r.enemies=[e];tick(r,.01);
+  assert.equal(e.attackSequence,1,'type '+type);assert.ok(e.attackTimer>0);
+  assert.ok(r.events.some(event=>event.type==='attack'&&event.id===e.id));
+  tick(r,.02);assert.equal(e.attackSequence,1);assert.ok(e.attackTimer>0);
+  if(type===3)assert.ok(r.bolts.length>0);else assert.ok(p.hp<100);
+ }
+});
+
+test('royale bot species animate melee, blind and ranged attacks with protected players excluded',()=>{
+ for(let type=0;type<4;type++){
+  const r=room('botroyale'),p=r.players.get('human');
+  const e={id:201,type,bot:true,x:0,z:type===3?-5:-1,y:type===2?3:0,hp:100,cd:0};r.enemies=[e];
+  tickBots(r,.01);assert.equal(e.attackSequence,1,'bot type '+type);assert.ok(e.attackTimer>0);
+  p.protected=true;e.cd=0;const previous=e.attackSequence;tickBots(r,.1);assert.equal(e.attackSequence,previous);
+ }
+});
+
+test('slides reject even gentle uphill terrain and cancel on the stored heading after turning the camera',()=>{
+ const r=room('practice');r.map=0;const p=r.players.get('human');
+ p.x=10.1;p.y=terrainHeight(p.x,0,0);p.input={yaw:-Math.PI/2,pitch:0,w:true,sprint:true,slide:true};
+ tick(r,.05);assert.equal(p.slide,0);
+ p.x=9.7;p.z=0;p.y=terrainHeight(p.x,0,0);p.slide=.5;p.slideX=1;p.slideZ=0;
+ p.input={yaw:Math.PI/2,pitch:0};tick(r,.1);
+ assert.equal(p.slide,0);assert.equal(p.x,9.7);
+ p.x=14;p.y=terrainHeight(p.x,0,0);p.slide=.5;p.slideX=-1;p.slideZ=0;
+ tick(r,.1);assert.ok(p.slide>0);assert.ok(p.x<14);
+});
+
+test('slide elevation checks include solid ascending ramp collision support',()=>{
+ const layout=[];layout.mapIndex=25;
+ for(let i=0;i<20;i++)layout.push([0,-2+(i+.5)*.2,4,.2,(i+1)*.15,0,true]);
+ const p=player({x:0,z:-1.9,y:.15});
+ assert.equal(risesAlong(p,0,.4,layout),true);
+ p.z=1.9;p.y=3;assert.equal(risesAlong(p,0,-.4,layout),false);
+});
+
+test('every outpost ladder climbs to its shared upper deck, supports stopping and descends through the hatch',()=>{
+ for(let map=0;map<maps.length;map++)for(const ladder of maps[map].ladders){
+  const r=room('practice',{map}),p=r.players.get('human');
+  Object.assign(p,{x:ladder.x,z:ladder.z,y:ladder.bottom,input:{yaw:0,pitch:0,w:true}});
+  tick(r,.1);assert.equal(p.climbing,true);assert.ok(p.y>ladder.bottom);
+  p.input={yaw:0,pitch:0};const stopped=p.y;tick(r,.1);assert.equal(p.y,stopped);
+  p.input={yaw:0,pitch:0,w:true};
+  for(let i=0;i<100&&p.climbing;i++)tick(r,.05);
+  assert.equal(p.climbing,false);assert.equal(p.y,ladder.top);assert.equal(p.z,ladder.landingZ);
+  const layout=roomLayout(r);assert.equal(blocked(p.x,p.z,.45,layout,p.y),false);
+  assert.equal(supportHeight(p.x,p.z,p.y,layout),ladder.top);
+  Object.assign(p,{x:ladder.x,z:ladder.z,input:{yaw:0,pitch:0,s:true}});
+  tick(r,.1);assert.ok(p.climbing);assert.ok(p.y<ladder.top);
+ }
+});
